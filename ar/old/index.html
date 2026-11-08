@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AR Video on A4 (X marks)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: system-ui, sans-serif; color: #fff; touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
+  #stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  #cam { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  #overlay, #sheetcv { position: absolute; left: 0; top: 0; transform-origin: 0 0; display: none; pointer-events: none; }
+  #marks { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+  #vid { position: absolute; width: 2px; height: 2px; opacity: 0; pointer-events: none; left: 0; top: 0; }
+  #start {
+    position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px; background: #111; text-align: center; padding: 24px;
+  }
+  #start button { font-size: 20px; padding: 14px 32px; border: 0; border-radius: 12px; background: #4f8cff; color: #fff; cursor: pointer; }
+  #start button:disabled { background: #444; color: #aaa; cursor: default; }
+  #start p { max-width: 400px; color: #bbb; line-height: 1.45; margin: 0; }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: calc(92px + env(safe-area-inset-bottom)); z-index: 5; text-align: center; display: none;
+    font-size: 15px; text-shadow: 0 1px 4px #000; pointer-events: none; padding: 0 12px;
+  }
+  #dbg { position: fixed; left: 8px; top: 8px; width: 40%; max-width: 260px; z-index: 15; display: none; border: 1px solid #0f0; opacity: .9; pointer-events: none; }
+  #gear {
+    position: fixed; top: calc(12px + env(safe-area-inset-top)); right: 12px; z-index: 20; display: none;
+    width: 44px; height: 44px; border-radius: 50%; border: 0; background: rgba(0,0,0,.55); color: #fff; font-size: 22px; cursor: pointer;
+  }
+  #opts { position: fixed; left: 0; right: 0; bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 20; display: none; justify-content: center; gap: 12px; }
+  #opts button { width: 58px; height: 58px; border-radius: 50%; border: 2px solid rgba(255,255,255,.5); background: rgba(0,0,0,.55); color: #fff; font-size: 24px; font-weight: 600; }
+  #opts button.on { background: #4f8cff; border-color: #fff; }
+  #panel {
+    position: fixed; top: 64px; right: 12px; z-index: 20; display: none; width: 240px; max-height: calc(100% - 80px); overflow: auto;
+    padding: 12px 14px; border-radius: 12px; background: rgba(0,0,0,.78); font-size: 14px;
+  }
+  #panel label { display: block; margin: 8px 0 2px; }
+  #panel .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  #panel .row label { margin: 0; }
+  #panel input[type=range] { width: 100%; }
+  #panel input[type=color] { width: 100%; height: 34px; border: 0; padding: 0; background: none; }
+  #panel select, #panel button { width: 100%; padding: 6px; border-radius: 8px; border: 0; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="sheetcv"></canvas>
+  <canvas id="overlay"></canvas>
+  <svg id="marks"><g id="cands"></g><polygon id="poly" fill="none" stroke="#00e5ff" stroke-width="3" points=""/></svg>
+</div>
+
+<video id="vid" loop playsinline preload="auto" crossorigin="anonymous"></video>
+
+<div id="start">
+  <h2>AR Video on A4</h2>
+  <p id="startMsg">
+    Use a white A4 sheet with a <b>black X in each corner</b>. Keep the Xs about 2&ndash;3&nbsp;cm wide, and keep
+    them <b>clear of the border line</b> (leave about 1.5&nbsp;cm of white between each X and the border).
+    Show the sheet to the camera (all four Xs visible), then pick <b>1, 2, 3 or 5</b> at the bottom.
+  </p>
+  <button id="startBtn" disabled>Loading vision engine…</button>
+</div>
+
+<canvas id="dbg"></canvas>
+<div id="opts"></div>
+<div id="status">Looking for the 4 X marks…</div>
+<button id="gear" aria-label="Settings">⚙</button>
+<div id="panel">
+  <div class="row"><input type="checkbox" id="chroma"><label for="chroma">Remove green (green-screen .mp4 only)</label></div>
+  <label>Key colour</label>
+  <input type="color" id="keyColor" value="#00ff00">
+  <label>Similarity <span id="simVal"></span></label>
+  <input type="range" id="sim" min="0.05" max="0.8" step="0.01" value="0.35">
+  <label>Edge smoothness <span id="smoothVal"></span></label>
+  <input type="range" id="smooth" min="0.01" max="0.4" step="0.01" value="0.10">
+  <label>Green spill removal <span id="spillVal"></span></label>
+  <input type="range" id="spill" min="0" max="1" step="0.05" value="0.5">
+  <label>Extend sheet image past the Xs <span id="extVal"></span></label>
+  <input type="range" id="extend" min="0" max="0.2" step="0.01" value="0.05">
+  <label>Floating card size <span id="cardwVal"></span></label>
+  <input type="range" id="cardw" min="0.3" max="0.95" step="0.01" value="0.62">
+  <label>Lift height <span id="liftVal"></span></label>
+  <input type="range" id="lift" min="0" max="0.2" step="0.01" value="0.05">
+  <label>Behind the video</label>
+  <select id="bg">
+    <option value="white">White</option>
+    <option value="black">Black</option>
+    <option value="none">See-through</option>
+  </select>
+  <button id="rotBtn">Rotate sheet 90°</button>
+  <div class="row"><input type="checkbox" id="outlineChk"><label for="outlineChk">Show tracked outline</label></div>
+  <div class="row"><input type="checkbox" id="debugChk"><label for="debugChk">Show detector view (debug)</label></div>
+</div>
+
+<script>
+/* ================= Settings ================= */
+const S = { chroma: false, key: '#00ff00', sim: 0.35, smooth: 0.10, spill: 0.5, extend: 0.05, cardw: 0.62, lift: 0.05, bg: 'none', outline: false, debug: false, opt: 1 };
+try { Object.assign(S, JSON.parse(localStorage.getItem('a4ar_settings4') || '{}')); } catch (e) {}
+function saveS() { try { localStorage.setItem('a4ar_settings4', JSON.stringify(S)); } catch (e) {} }
+
+/* ================= OpenCV loading ================= */
+let cvReady = false;
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.async = true; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+}
+async function loadCV() {
+  const urls = [
+    'https://docs.opencv.org/4.8.0/opencv.js',
+    'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.1/dist/opencv.js'
+  ];
+  let loaded = false;
+  for (const u of urls) {
+    try { await loadScript(u); loaded = true; break; } catch (e) { console.warn('failed', u); }
+  }
+  const msg = document.getElementById('startMsg');
+  if (!loaded) { msg.textContent = 'Could not download the vision engine (OpenCV). Check your internet connection and reload.'; return; }
+  let tries = 0;
+  await new Promise(resolve => {
+    const t = setInterval(() => {
+      tries++;
+      if (typeof cv !== 'undefined') {
+        if (cv.Mat) { clearInterval(t); resolve(); }
+        else if (cv instanceof Promise && !cv._waiting) { cv._waiting = true; cv.then(m => { window.cv = m; }); }
+      }
+      if (tries > 400) { clearInterval(t); resolve(); }
+    }, 150);
+  });
+  if (typeof cv === 'undefined' || !cv.Mat) { msg.textContent = 'Vision engine failed to start. Reload the page.'; return; }
+  cvReady = true;
+  const b = document.getElementById('startBtn');
+  b.disabled = false; b.textContent = 'Start AR';
+}
+loadCV();
+
+/* ================= Elements & UI ================= */
+const cam = document.getElementById('cam');
+const vid = document.getElementById('vid');
+const stage = document.getElementById('stage');
+const ov = document.getElementById('overlay');
+const poly = document.getElementById('poly');
+const marksSvg = document.getElementById('marks');
+const candsG = document.getElementById('cands');
+const statusEl = document.getElementById('status');
+const gear = document.getElementById('gear');
+const panel = document.getElementById('panel');
+
+function bindUI() {
+  const map = [
+    ['chroma', 'chroma', 'checked'], ['keyColor', 'key', 'value'], ['sim', 'sim', 'value', 'simVal', true],
+    ['smooth', 'smooth', 'value', 'smoothVal', true], ['spill', 'spill', 'value', 'spillVal', true],
+    ['extend', 'extend', 'value', 'extVal', true], ['cardw', 'cardw', 'value', 'cardwVal', true], ['lift', 'lift', 'value', 'liftVal', true],
+    ['bg', 'bg', 'value'], ['outlineChk', 'outline', 'checked'], ['debugChk', 'debug', 'checked']
+  ];
+  map.forEach(([id, key, attr, lbl, num]) => {
+    const el = document.getElementById(id);
+    el[attr] = S[key];
+    const show = () => { if (lbl) document.getElementById(lbl).textContent = '(' + S[key] + ')'; };
+    show();
+    const upd = () => { S[key] = num ? parseFloat(el[attr]) : el[attr]; show(); saveS(); };
+    el.addEventListener('input', upd);
+    el.addEventListener('change', upd);
+  });
+}
+bindUI();
+gear.addEventListener('click', () => { panel.style.display = panel.style.display === 'block' ? 'none' : 'block'; });
+let rot = 0;
+document.getElementById('rotBtn').addEventListener('click', () => { rot = (rot + 1) % 4; });
+
+/* ================= WebGL: video + green screen drawn onto an A4-shaped canvas ================= */
+const gl = ov.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: false });
+const VS = `
+attribute vec2 a_pos; varying vec2 v_uv;
+void main(){ v_uv = vec2((a_pos.x+1.0)/2.0, (1.0-a_pos.y)/2.0); gl_Position = vec4(a_pos,0.0,1.0); }`;
+const FS = `
+precision mediump float;
+uniform sampler2D u_tex; uniform vec3 u_key; uniform vec3 u_bg; uniform float u_bgOn;
+uniform float u_sim, u_smooth, u_spill, u_chroma, u_ca, u_va, u_fit;
+varying vec2 v_uv;
+vec2 cbcr(vec3 c){ return vec2(-0.168736*c.r - 0.331264*c.g + 0.5*c.b, 0.5*c.r - 0.418688*c.g - 0.081312*c.b); }
+void main(){
+  vec2 uv = v_uv;
+  if (u_fit < 0.5) {
+    if (u_ca > u_va) uv.x = (uv.x-0.5)*(u_ca/u_va)+0.5; else uv.y = (uv.y-0.5)*(u_va/u_ca)+0.5;
+  } else if (u_fit < 1.5) {
+    if (u_ca > u_va) uv.y = (uv.y-0.5)*(u_va/u_ca)+0.5; else uv.x = (uv.x-0.5)*(u_ca/u_va)+0.5;
+  }
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { gl_FragColor = vec4(u_bg*u_bgOn, u_bgOn); return; }
+  vec4 t = texture2D(u_tex, uv); vec3 c = t.rgb;
+  float a = t.a;
+  if (u_chroma > 0.5) {
+    float d = distance(cbcr(c), cbcr(u_key));
+    a *= smoothstep(u_sim*0.5, u_sim*0.5 + u_smooth, d);
+    float lim = max(c.r, c.b);
+    c.g = mix(c.g, min(c.g, lim), u_spill);
+  }
+  vec3 outRgb = c*a + u_bg*(1.0-a)*u_bgOn;
+  float outA = a + (1.0-a)*u_bgOn;
+  gl_FragColor = vec4(outRgb, outA);
+}`;
+function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const locPos = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(locPos);
+gl.vertexAttribPointer(locPos, 2, gl.FLOAT, false, 0, 0);
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+const U = {};
+['u_tex','u_key','u_bg','u_bgOn','u_sim','u_smooth','u_spill','u_chroma','u_ca','u_va','u_fit'].forEach(n => U[n] = gl.getUniformLocation(prog, n));
+function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; }
+
+function drawVideoToCanvas() {
+  if (vid.readyState < 2) return;
+  gl.viewport(0, 0, ov.width, ov.height);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, vid);
+  gl.uniform1i(U.u_tex, 0);
+  gl.uniform3fv(U.u_key, hexToRgb(S.key));
+  gl.uniform3fv(U.u_bg, S.bg === 'black' ? [0, 0, 0] : [1, 1, 1]);
+  gl.uniform1f(U.u_bgOn, S.bg === 'none' ? 0 : 1);
+  gl.uniform1f(U.u_sim, S.sim);
+  gl.uniform1f(U.u_smooth, S.smooth);
+  gl.uniform1f(U.u_spill, S.spill);
+  gl.uniform1f(U.u_chroma, (S.chroma || /\.mp4/i.test(vid.currentSrc)) ? 1 : 0);
+  gl.uniform1f(U.u_ca, ov.width / ov.height);
+  gl.uniform1f(U.u_va, (vid.videoWidth || 16) / (vid.videoHeight || 9));
+  gl.uniform1f(U.u_fit, 2);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+/* ================= X-mark detection and tracking ================= */
+const AW = 640;                       // analysis width
+let vw = 0, vh = 0, AH = 0, sc = 1, sctx = null, winSize = null, criteria = null;
+const small = document.createElement('canvas');
+let prevGray = null;
+const track = { pts: null, miss: 0, last: null };   // pts: 4 corners in analysis pixels, identity preserved frame to frame
+let lastCandCount = 0;
+
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+function setupDetect() {
+  AH = Math.round(AW * vh / vw);
+  small.width = AW; small.height = AH;
+  sctx = small.getContext('2d', { willReadFrequently: true });
+  sc = vw / AW;
+  winSize = new cv.Size(21, 21);
+  criteria = new cv.TermCriteria(cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 10, 0.03);
+}
+
+/* ---- X blob scanner (pure JS connected components + X-shape test) ---- */
+let _stack = null, _list = null, _work = null;
+function scanBlobs(src, W, H, out) {
+  const N = W * H;
+  if (!_stack || _stack.length < N) { _stack = new Int32Array(N); _list = new Int32Array(N); _work = new Uint8Array(N); }
+  const work = _work, stack = _stack, list = _list;
+  work.set(src.subarray ? src.subarray(0, N) : src);
+  const total = N, maxSide = W * 0.25;
+  for (let s = 0; s < N; s++) {
+    if (!work[s]) continue;
+    let sp = 0, n = 0, x0 = W, x1 = 0, y0 = H, y1 = 0, sx = 0, sy = 0;
+    stack[sp++] = s; work[s] = 0;
+    while (sp) {
+      const p = stack[--sp]; list[n++] = p;
+      const y = (p / W) | 0, x = p - y * W;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      sx += x; sy += y;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy; if (ny < 0 || ny >= H) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx; if (nx < 0 || nx >= W) continue;
+          const q = ny * W + nx;
+          if (work[q]) { work[q] = 0; stack[sp++] = q; }
+        }
+      }
+    }
+    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    if (n < 15 || n > total * 0.02 || w < 8 || h < 8 || w > maxSide || h > maxSide) continue;
+    const asp = w / h; if (asp < 0.5 || asp > 2.0) continue;
+    const fill = n / (w * h); if (fill < 0.12 || fill > 0.80) continue;
+    const q = Math.max(2, Math.round(Math.min(w, h) * 0.22)), hq = Math.floor(q / 2);
+    const mx = Math.floor(w / 2) - hq, my = Math.floor(h / 2) - hq;
+    const B = [                                           // 4 corners, 4 edge-midpoints, centre
+      [0, 0, q, q], [w - q, 0, w, q], [0, h - q, q, h], [w - q, h - q, w, h],
+      [mx, 0, mx + q + 1, q], [mx, h - q, mx + q + 1, h], [0, my, q, my + q + 1], [w - q, my, w, my + q + 1],
+      [mx, my, mx + q + 1, my + q + 1]
+    ];
+    const cnt = new Array(9).fill(0);
+    for (let i = 0; i < n; i++) {
+      const p = list[i], y = ((p / W) | 0) - y0, x = (p % W) - x0;
+      for (let b = 0; b < 9; b++) { const r = B[b]; if (x >= r[0] && x < r[2] && y >= r[1] && y < r[3]) cnt[b]++; }
+    }
+    const ink = B.map((r, b) => cnt[b] / Math.max(1, (Math.min(r[2], w) - r[0]) * (Math.min(r[3], h) - r[1])));
+    if (Math.min(ink[0], ink[1], ink[2], ink[3]) < 0.10) continue;   // all 4 arms reach the corners
+    if (ink[8] < 0.45) continue;                                      // the crossing is inked
+    const mids = ink.slice(4, 8);
+    if (Math.max(...mids) > 0.45 || (mids[0] + mids[1] + mids[2] + mids[3]) / 4 > 0.30) continue;   // edge midpoints empty
+    const cx = sx / n, cy = sy / n, sz = Math.sqrt(w * h);
+    if (out.some(o => Math.hypot(cx - o[0], cy - o[1]) < Math.max(6, 0.5 * sz))) continue;
+    out.push([cx, cy, sz]);
+  }
+}
+
+/* Find X marks: threshold (3 sensitivity passes), join broken strokes, then keep blobs shaped like an X */
+const PASSES = [[31, 12], [41, 6], [25, 18]];
+const dbg = document.getElementById('dbg');
+function findX(gray) {
+  const blur = new cv.Mat(), bin = new cv.Mat(), closed = new cv.Mat(), k = cv.Mat.ones(3, 3, cv.CV_8U);
+  const out = [];
+  try {
+    cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0);
+    for (const [bs, C] of PASSES) {
+      cv.adaptiveThreshold(blur, bin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, bs, C);
+      cv.morphologyEx(bin, closed, cv.MORPH_CLOSE, k);
+      scanBlobs(closed.data, closed.cols, closed.rows, out);
+      if (out.length >= 4 && bestQuad(out)) break;
+    }
+    if (S.debug) cv.imshow(dbg, closed);
+  } finally { blur.delete(); bin.delete(); closed.delete(); k.delete(); }
+  return out;
+}
+
+/* Corner ordering: clockwise on screen, starting at the top-left-most */
+function orderPts(p) {
+  const cx = (p[0][0] + p[1][0] + p[2][0] + p[3][0]) / 4, cy = (p[0][1] + p[1][1] + p[2][1] + p[3][1]) / 4;
+  const q = p.map(a => ({ a, ang: Math.atan2(a[1] - cy, a[0] - cx) })).sort((x, y) => x.ang - y.ang).map(o => o.a);
+  let k = 0, min = 1e12;
+  q.forEach((a, i) => { const s = a[0] + a[1]; if (s < min) { min = s; k = i; } });
+  return [0, 1, 2, 3].map(i => q[(k + i) % 4]);
+}
+function convexQuad(p) {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = p[i], b = p[(i + 1) % 4], c = p[(i + 2) % 4];
+    const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+    const sg = cr > 0 ? 1 : -1;
+    if (sign === 0) sign = sg; else if (sg !== sign) return false;
+  }
+  return true;
+}
+function quadArea(p) {
+  let a = 0;
+  for (let i = 0; i < 4; i++) { const b = p[(i + 1) % 4]; a += p[i][0] * b[1] - b[0] * p[i][1]; }
+  return Math.abs(a) / 2;
+}
+
+/* Pick the best group of 4 X marks that forms a sheet-like quadrilateral */
+function bestQuad(cands) {
+  const cs = cands.slice().sort((a, b) => b[2] - a[2]).slice(0, 12);
+  let best = null;
+  const n = cs.length;
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) for (let k = j + 1; k < n; k++) for (let l = k + 1; l < n; l++) {
+    const g = [cs[i], cs[j], cs[k], cs[l]];
+    const sizes = g.map(c => c[2]);
+    if (Math.max(...sizes) / Math.min(...sizes) > 3.5) continue;
+    const pts = orderPts(g.map(c => [c[0], c[1]]));
+    if (!convexQuad(pts)) continue;
+    const e = [dist(pts[0], pts[1]), dist(pts[1], pts[2]), dist(pts[2], pts[3]), dist(pts[3], pts[0])];
+    if (Math.min(...e) < 20) continue;
+    const w = (e[0] + e[2]) / 2, h = (e[1] + e[3]) / 2;
+    const r = Math.max(w, h) / Math.min(w, h);
+    if (r > 3.5) continue;
+    if (Math.max(e[0], e[2]) / Math.min(e[0], e[2]) > 3.2 || Math.max(e[1], e[3]) / Math.min(e[1], e[3]) > 3.2) continue;
+    const score = quadArea(pts) * (1 - Math.min(0.5, Math.abs(r - 1.4) / 1.4 * 0.5));
+    if (!best || score > best.score) best = { score, pts };
+  }
+  return best;
+}
+
+/* Keep each corner's identity from frame to frame (so the video never flips) */
+function shiftMatch(q, p) {
+  let best = null;
+  for (let s = 0; s < 4; s++) {
+    let d = 0;
+    for (let i = 0; i < 4; i++) d += dist(q[(i + s) % 4], p[i]);
+    if (!best || d < best.d) best = { d, s };
+  }
+  return [0, 1, 2, 3].map(i => q[(i + best.s) % 4]);
+}
+function associate(cands, prev, R) {
+  const pairs = [];
+  prev.forEach((p, i) => cands.forEach((c, j) => { const d = Math.hypot(c[0] - p[0], c[1] - p[1]); if (d < R) pairs.push([d, i, j]); }));
+  pairs.sort((a, b) => a[0] - b[0]);
+  const res = [null, null, null, null], usedI = new Set(), usedJ = new Set();
+  for (const [d, i, j] of pairs) {
+    if (usedI.has(i) || usedJ.has(j)) continue;
+    res[i] = [cands[j][0], cands[j][1]]; usedI.add(i); usedJ.add(j);
+  }
+  return res;
+}
+
+/* Optical flow keeps the corners when the Xs are momentarily not detected */
+function flowCorners(curGray) {
+  if (!track.pts || !prevGray) return null;
+  const p0 = cv.matFromArray(4, 1, cv.CV_32FC2, [].concat(...track.pts));
+  const p1 = new cv.Mat(), st = new cv.Mat(), err = new cv.Mat();
+  let out = null;
+  try {
+    cv.calcOpticalFlowPyrLK(prevGray, curGray, p0, p1, st, err, winSize, 3, criteria);
+    if (st.data[0] && st.data[1] && st.data[2] && st.data[3]) {
+      const q = [0, 1, 2, 3].map(i => [p1.data32F[2 * i], p1.data32F[2 * i + 1]]);
+      if (convexQuad(q)) out = q;
+    }
+  } finally { p0.delete(); p1.delete(); st.delete(); err.delete(); }
+  return out;
+}
+
+function trackFrame() {
+  sctx.drawImage(cam, 0, 0, AW, AH);
+  const src = cv.imread(small), gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  src.delete();
+
+  const cands = findX(gray);
+  lastCandCount = cands.length;
+  let nw = null;
+
+  if (track.pts) {                                    // 1) follow the previous corners
+    const a = associate(cands, track.pts, Math.max(20, 0.12 * AW));
+    const have = a.filter(v => v).length;
+    if (have === 4) nw = a;
+    else if (have === 3) {                            // one X hidden: predict it from the other three
+      const idx = [0, 1, 2, 3].filter(i => a[i]), mi = [0, 1, 2, 3].find(i => !a[i]);
+      const s = cv.matFromArray(3, 1, cv.CV_32FC2, [].concat(...idx.map(i => track.pts[i])));
+      const d = cv.matFromArray(3, 1, cv.CV_32FC2, [].concat(...idx.map(i => a[i])));
+      const A = cv.getAffineTransform(s, d), m = A.data64F, p = track.pts[mi];
+      nw = a.map((v, i) => v || (i === mi ? [m[0] * p[0] + m[1] * p[1] + m[2], m[3] * p[0] + m[4] * p[1] + m[5]] : null));
+      s.delete(); d.delete(); A.delete();
+    }
+  }
+  if (!nw && cands.length >= 4) {                     // 2) search for a fresh set of 4 Xs
+    const b = bestQuad(cands);
+    if (b) {
+      const ref = track.pts || (track.last && track.miss < 60 ? track.last : null);
+      nw = ref ? shiftMatch(b.pts, ref) : b.pts;
+    }
+  }
+  if (!nw) nw = flowCorners(gray);                    // 3) bridge short gaps with optical flow
+
+  if (nw) {
+    if (track.pts) {
+      const md = nw.reduce((s, p, i) => s + dist(p, track.pts[i]), 0) / 4;
+      const al = Math.min(1, Math.max(0.4, md / (AW * 0.02)));
+      track.pts = track.pts.map((o, i) => [o[0] + (nw[i][0] - o[0]) * al, o[1] + (nw[i][1] - o[1]) * al]);
+    } else track.pts = nw.map(p => [p[0], p[1]]);
+    track.miss = 0;
+    track.last = track.pts.map(p => [p[0], p[1]]);
+  } else {
+    track.miss++;
+    if (track.miss > 20) track.pts = null;
+  }
+  if (prevGray) prevGray.delete();
+  prevGray = gray;
+  drawCandidates(cands);
+}
+
+const circles = [];
+for (let i = 0; i < 12; i++) {
+  const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  c.setAttribute('r', 18); c.setAttribute('fill', 'none'); c.setAttribute('stroke', '#7CFC00'); c.setAttribute('stroke-width', 3);
+  c.style.display = 'none'; candsG.appendChild(c); circles.push(c);
+}
+function drawCandidates(cands) {
+  circles.forEach((c, i) => {
+    if ((!track.pts || S.debug) && cands[i]) {
+      c.setAttribute('cx', cands[i][0] * sc); c.setAttribute('cy', cands[i][1] * sc); c.style.display = '';
+    } else c.style.display = 'none';
+  });
+}
+
+/* ================= Options, sheet image (flat on the A4) and the elevated card (the video) ================= */
+const OPTS = [1, 2, 3, 5];
+const isApple = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1) || /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+const sheetCv = document.getElementById('sheetcv'), sg = sheetCv.getContext('2d');
+let sheetImg = null, sheetOk = false, sheetErr = false, sheetKey = '', tilt = 0.9;
+const optsEl = document.getElementById('opts');
+OPTS.forEach(n => {
+  const b = document.createElement('button'); b.textContent = n; b.dataset.n = n;
+  b.addEventListener('click', () => selectOption(n)); optsEl.appendChild(b);
+});
+function selectOption(n) {
+  if (!OPTS.includes(n)) n = OPTS[0];
+  S.opt = n; saveS();
+  optsEl.querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.n === n));
+  // Safari/iPhone cannot read WebM transparency, so it gets the green-screen N.mp4 (keyed out in the shader)
+  vid.innerHTML = (isApple ? '' : '<source src="' + n + '.webm" type="video/webm">') + '<source src="' + n + '.mp4" type="video/mp4">';
+  vid.load(); vid.muted = false;
+  vid.play().catch(() => { vid.muted = true; vid.play().catch(() => {}); });
+  sheetOk = false; sheetErr = false; sheetKey = '';
+  sheetImg = new Image();
+  sheetImg.onload = () => { sheetOk = true; sheetKey = ''; };
+  sheetImg.onerror = () => { sheetErr = true; };
+  sheetImg.src = n + '.jpg';
+}
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function setMatrix(el, m) { el.style.transform = `matrix3d(${m[0]},${m[3]},0,${m[6]}, ${m[1]},${m[4]},0,${m[7]}, 0,0,1,0, ${m[2]},${m[5]},0,${m[8]})`; }
+function persp(src, dst) {
+  const a = cv.matFromArray(4, 1, cv.CV_32FC2, src), b = cv.matFromArray(4, 1, cv.CV_32FC2, dst);
+  const H = cv.getPerspectiveTransform(a, b), m = Array.from(H.data64F);
+  a.delete(); b.delete(); H.delete();
+  return m;
+}
+function cardDims(cw, ch) {
+  const asp = (vid.videoWidth || 16) / (vid.videoHeight || 9);
+  const Wc = Math.min(S.cardw * cw, 0.55 * Math.min(cw, ch) * asp);
+  return { Wc, Hc: Wc / asp, Yb: 0.82 * ch, hv: S.lift * ch };
+}
+function drawSheet(cw, ch) {
+  sg.clearRect(0, 0, cw, ch);
+  if (sheetOk) {
+    const ia = sheetImg.width / sheetImg.height;
+    if (Math.abs(cw / ch / ia - 1) < 0.25) sg.drawImage(sheetImg, 0, 0, cw, ch);      // A4-shaped image: fill the sheet exactly
+    else {                                                                           // other shape: keep proportions
+      sg.fillStyle = '#fff'; sg.fillRect(0, 0, cw, ch);
+      const k = Math.min(cw / sheetImg.width, ch / sheetImg.height), dw = sheetImg.width * k, dh = sheetImg.height * k;
+      sg.drawImage(sheetImg, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+    }
+  }
+  const d = cardDims(cw, ch);                                                        // soft shadow under the floating card
+  sg.save(); sg.translate(cw / 2, d.Yb); sg.scale(1, 0.14);
+  const g = sg.createRadialGradient(0, 0, 0, 0, 0, d.Wc * 0.55);
+  g.addColorStop(0, 'rgba(0,0,0,.45)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  sg.fillStyle = g; sg.beginPath(); sg.arc(0, 0, d.Wc * 0.55, 0, 7); sg.fill(); sg.restore();
+}
+/* Camera pose of the sheet from its homography (focal length is a phone-camera guess), so the card can stand up in 3D */
+function pose(m) {
+  const f = 0.8 * vw, cx = vw / 2, cy = vh / 2;
+  const ki = (a, b, c) => [(a - cx * c) / f, (b - cy * c) / f, c];
+  const h1 = ki(m[0], m[3], m[6]), h2 = ki(m[1], m[4], m[7]), h3 = ki(m[2], m[5], m[8]);
+  const l = 2 / (Math.hypot(...h1) + Math.hypot(...h2));
+  let r1 = h1.map(v => v * l), r2 = h2.map(v => v * l), t = h3.map(v => v * l);
+  if (t[2] < 0) { r1 = r1.map(v => -v); r2 = r2.map(v => -v); t = t.map(v => -v); }
+  let r3 = [r1[1] * r2[2] - r1[2] * r2[1], r1[2] * r2[0] - r1[0] * r2[2], r1[0] * r2[1] - r1[1] * r2[0]];
+  if (r3[2] > 0) r3 = r3.map(v => -v);                                               // "up" points toward the camera
+  return { r1, r2, r3, t, f, cx, cy };
+}
+function proj(P, p) {
+  const x = P.r1[0] * p[0] + P.r2[0] * p[1] + P.r3[0] * p[2] + P.t[0];
+  const y = P.r1[1] * p[0] + P.r2[1] * p[1] + P.r3[1] * p[2] + P.t[1];
+  const z = P.r1[2] * p[0] + P.r2[2] * p[1] + P.r3[2] * p[2] + P.t[2];
+  return z > 1e-6 ? [P.f * x / z + P.cx, P.f * y / z + P.cy] : null;
+}
+
+/* ================= Rendering ================= */
+let portrait = false;
+function render() {
+  dbg.style.display = S.debug ? 'block' : 'none';
+  if (!track.pts) {
+    ov.style.display = 'none'; sheetCv.style.display = 'none'; poly.setAttribute('points', '');
+    const n = lastCandCount;
+    statusEl.textContent = n === 0 ? 'No X marks found. Need a black X in each corner of a white sheet, good light, Xs clear of any border line.'
+      : n < 4 ? 'Found ' + n + ' of 4 X marks. Keep all four visible and in focus.'
+      : 'Found ' + n + ' X-like marks but none form a sheet shape. Hide other X-like things (writing, patterns).';
+    statusEl.style.display = 'block';
+    if (!vid.paused) vid.pause();
+    return;
+  }
+  const vidBad = vid.networkState === 3 && vid.readyState === 0;
+  if (vidBad) { statusEl.textContent = 'Sheet found, but ' + S.opt + (isApple ? '.mp4' : '.webm') + ' did not load. Put it in the same folder as this page.'; statusEl.style.display = 'block'; }
+  else if (sheetErr) { statusEl.textContent = 'Sheet found, but ' + S.opt + '.jpg was not found next to this page.'; statusEl.style.display = 'block'; }
+  else if (S.debug) { statusEl.textContent = 'Sheet locked'; statusEl.style.display = 'block'; }
+  else statusEl.style.display = 'none';
+  if (vid.paused) { vid.muted = false; vid.play().catch(() => { vid.muted = true; vid.play().catch(() => {}); }); }
+
+  const pv = track.pts.map(p => [p[0] * sc, p[1] * sc]);
+  const eff = [0, 1, 2, 3].map(i => pv[(i + rot) % 4]);
+  const w = (dist(eff[0], eff[1]) + dist(eff[3], eff[2])) / 2;
+  const h = (dist(eff[0], eff[3]) + dist(eff[1], eff[2])) / 2;
+  if (h / w > 1.12) portrait = true; else if (h / w < 0.89) portrait = false;
+  const cw = portrait ? 630 : 891, ch = portrait ? 891 : 630;     // A4 proportions
+
+  // 1) the JPG, flat on the A4
+  if (sheetCv.width !== cw || sheetCv.height !== ch) { sheetCv.width = cw; sheetCv.height = ch; sheetKey = ''; }
+  const key = [cw, ch, sheetOk, vid.videoWidth, S.cardw].join('|');
+  if (key !== sheetKey) { drawSheet(cw, ch); sheetKey = key; }
+  const px = S.extend * cw, py = S.extend * ch;                   // extend past the X marks
+  const m = persp([px, py, cw - px, py, cw - px, ch - py, px, ch - py], [].concat(...eff));
+  setMatrix(sheetCv, m); sheetCv.style.display = 'block';
+
+  // 2) the transparent video, standing above the sheet and leaning toward the camera
+  const vwid = vid.videoWidth || 640, vhei = vid.videoHeight || 360, k = Math.min(1, 720 / Math.max(vwid, vhei));
+  const ccw = Math.round(vwid * k), cch = Math.round(vhei * k);
+  if (ov.width !== ccw || ov.height !== cch) { ov.width = ccw; ov.height = cch; }
+  const P = pose(m), d = cardDims(cw, ch);
+  const C = [-dot3(P.r1, P.t), -dot3(P.r2, P.t), -dot3(P.r3, P.t)];   // camera position in sheet coordinates
+  const target = Math.min(1.35, Math.max(0.3, Math.atan2(C[1] - d.Yb, C[2])));
+  tilt += (target - tilt) * 0.2;                                  // 0.3 = nearly flat (looking from above), 1.35 = upright
+  const x0 = cw / 2 - d.Wc / 2, x1 = cw / 2 + d.Wc / 2, ty = d.Yb - d.Hc * Math.cos(tilt), tz = d.hv + d.Hc * Math.sin(tilt);
+  const q = [[x0, ty, tz], [x1, ty, tz], [x1, d.Yb, d.hv], [x0, d.Yb, d.hv]].map(p => proj(P, p));
+  if (q.some(v => !v)) ov.style.display = 'none';
+  else {
+    setMatrix(ov, persp([0, 0, ccw, 0, ccw, cch, 0, cch], [].concat(...q)));
+    drawVideoToCanvas();
+    ov.style.display = 'block';
+  }
+  poly.setAttribute('points', S.outline ? pv.map(p => p[0] + ',' + p[1]).join(' ') : '');
+}
+
+let running = false, lastDet = 0;
+function loop(now) {
+  requestAnimationFrame(loop);
+  if (!running) return;
+  if (now - lastDet > 30) {
+    lastDet = now;
+    try { trackFrame(); } catch (err) { console.error(err); }
+  }
+  try { render(); } catch (err) { console.error(err); }
+}
+
+/* ================= Layout & start ================= */
+function layout() {
+  if (!vw) return;
+  const s = Math.min(innerWidth / vw, innerHeight / vh);
+  stage.style.width = vw + 'px'; stage.style.height = vh + 'px';
+  stage.style.transform = `translate(${(innerWidth - vw * s) / 2}px, ${(innerHeight - vh * s) / 2}px) scale(${s})`;
+  marksSvg.setAttribute('viewBox', `0 0 ${vw} ${vh}`);
+}
+addEventListener('resize', layout);
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  const msg = document.getElementById('startMsg');
+  if (!navigator.mediaDevices || !window.isSecureContext) {
+    msg.textContent = 'Camera blocked: open this page via http://localhost:8000 or an https:// link.';
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { ideal: 'environment' } }, audio: false
+    });
+    cam.srcObject = stream;
+    await cam.play();
+    await new Promise(r => { if (cam.videoWidth) r(); else cam.onloadedmetadata = r; });
+    vw = cam.videoWidth; vh = cam.videoHeight;
+    setupDetect(); layout();
+    selectOption(S.opt);
+    optsEl.style.display = 'flex';
+    try { if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {}); } catch (e) {}
+    document.getElementById('start').style.display = 'none';
+    gear.style.display = 'block';
+    statusEl.style.display = 'block';
+    running = true;
+  } catch (e) {
+    msg.textContent = 'Error: ' + e.name + ' - ' + e.message;
+    console.error(e);
+  }
+});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
